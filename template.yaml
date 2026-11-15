@@ -1,0 +1,234 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  LinkGuard - a serverless docs link-rot checker.
+  API Gateway + Lambda + Step Functions + DynamoDB + S3 + EventBridge Scheduler (+ optional SNS).
+  No servers, no deployment pipeline. Deploy with `sam build && sam deploy`.
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Default: ''
+    Description: Optional. Email address that gets an alert when a weekly re-check finds broken links.
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, '']]
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]
+    MemorySize: 256
+    Timeout: 15
+    CodeUri: src/
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref ScansTable
+        REPORT_BUCKET: !Ref ReportBucket
+        MAX_LINKS: '300'
+
+Resources:
+  # ---------------------------------------------------------------- data
+  ScansTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+
+  ReportBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireReports
+            Status: Enabled
+            ExpirationInDays: 30
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasAlertEmail
+    Properties:
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+
+  # ----------------------------------------------------------------- api
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 20
+        ThrottlingRateLimit: 10
+
+  UiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: ui.handler
+      Timeout: 5
+      Events:
+        Root:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /
+            Method: GET
+
+  StartScanFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: start.handler
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref LinkGuardStateMachine
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScansTable
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt LinkGuardStateMachine.Name
+      Events:
+        Start:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /scans
+            Method: POST
+
+  GetScanFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: get.handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ScansTable
+      Events:
+        Get:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /scans/{scanId}
+            Method: GET
+
+  ReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: report.handler
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref ReportBucket
+      Events:
+        Report:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /scans/{scanId}/report.csv
+            Method: GET
+
+  # ------------------------------------------------- workflow task functions
+  DiscoverLinksFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: discover.handler
+      Timeout: 60
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScansTable
+
+  CheckLinkFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: check.handler
+      Timeout: 30
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScansTable
+
+  FinalizeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: finalize.handler
+      Timeout: 30
+      Environment:
+        Variables:
+          ALERT_TOPIC_ARN: !If [HasAlertEmail, !Ref AlertTopic, '']
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScansTable
+        - S3WritePolicy:
+            BucketName: !Ref ReportBucket
+        - !If
+          - HasAlertEmail
+          - SNSPublishMessagePolicy:
+              TopicName: !GetAtt AlertTopic.TopicName
+          - !Ref AWS::NoValue
+
+  # ---------------------------------------------------- the orchestration
+  LinkGuardStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      DefinitionUri: statemachine/linkguard.asl.json
+      DefinitionSubstitutions:
+        DiscoverLinksFunctionArn: !GetAtt DiscoverLinksFunction.Arn
+        CheckLinkFunctionArn: !GetAtt CheckLinkFunction.Arn
+        FinalizeFunctionArn: !GetAtt FinalizeFunction.Arn
+        TableName: !Ref ScansTable
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref DiscoverLinksFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref CheckLinkFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref FinalizeFunction
+        - DynamoDBWritePolicy:
+            TableName: !Ref ScansTable
+
+  # ------------------------------------------------------ weekly re-checks
+  RescanFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: rescan.handler
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref LinkGuardStateMachine
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScansTable
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt LinkGuardStateMachine.Name
+      Events:
+        EveryMonday:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: cron(0 2 ? * MON *)
+            ScheduleExpressionTimezone: UTC
+
+Outputs:
+  AppUrl:
+    Description: Open this in a browser
+    Value: !Sub 'https://${Api}.execute-api.${AWS::Region}.${AWS::URLSuffix}/'
+  StateMachineArn:
+    Description: Watch executions in the Step Functions console
+    Value: !Ref LinkGuardStateMachine
+  ReportBucketName:
+    Description: Empty this bucket before running `sam delete`
+    Value: !Ref ReportBucket

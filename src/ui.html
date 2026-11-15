@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LinkGuard: find the dead links in your docs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #edf0f3;
+    --panel: #f8fafb;
+    --ink: #0e1a24;
+    --muted: #526170;
+    --rule: #c3ccd5;
+    --ok: #1b7f6b;
+    --redirect: #9a6200;
+    --broken: #b3261e;
+    --unverified: #6b7c8c;
+    --pending: #d5dbe1;
+    --focus: #1f5fbf;
+    --sans: "Bricolage Grotesque", system-ui, "Segoe UI", sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--paper); color: var(--ink); font-family: var(--sans); -webkit-text-size-adjust: 100%; }
+  body { margin: 0; line-height: 1.5; }
+  main { max-width: 980px; margin: 0 auto; padding: 56px 24px 96px; }
+  h1 { font-size: clamp(2.2rem, 5.5vw, 3.9rem); line-height: 1.02; letter-spacing: -0.035em; font-weight: 800; margin: 0 0 16px; max-width: 14ch; }
+  .lede { font-size: 1.15rem; color: var(--muted); max-width: 52ch; margin: 0 0 40px; }
+  .wordmark { font-weight: 600; letter-spacing: -0.01em; margin: 0 0 48px; display: flex; align-items: center; gap: 10px; }
+  .wordmark i { display: inline-flex; gap: 2px; height: 18px; }
+  .wordmark i span { width: 4px; background: var(--ok); }
+  .wordmark i span:nth-child(3) { background: var(--broken); }
+  .wordmark i span:nth-child(5) { background: var(--redirect); }
+
+  label.field { display: block; font-weight: 600; margin-bottom: 8px; }
+  .row { display: flex; gap: 12px; }
+  input[type="url"] {
+    flex: 1; min-width: 0; font: 400 1rem var(--mono); padding: 14px 16px; color: var(--ink);
+    background: var(--panel); border: 1px solid var(--rule); border-radius: 4px;
+  }
+  button {
+    font: 600 1rem var(--sans); padding: 14px 26px; color: #fff; background: var(--ink);
+    border: 0; border-radius: 4px; cursor: pointer; white-space: nowrap;
+  }
+  button:disabled { opacity: .55; cursor: progress; }
+  input:focus-visible, button:focus-visible, a:focus-visible, summary:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+  .check { display: flex; align-items: center; gap: 10px; margin-top: 14px; color: var(--muted); }
+  .check input { width: 18px; height: 18px; accent-color: var(--ink); }
+  .error { color: var(--broken); font-weight: 600; min-height: 1.5em; margin: 12px 0 0; }
+
+  .strip-wrap { margin-top: 40px; }
+  .strip { display: flex; gap: 2px; height: 72px; }
+  .strip span { flex: 1 1 0; min-width: 1px; background: var(--pending); transition: background-color .3s; }
+  .strip span[data-state="ok"] { background: var(--ok); }
+  .strip span[data-state="redirect"] { background: var(--redirect); }
+  .strip span[data-state="broken"] { background: var(--broken); }
+  .strip span[data-state="unverified"] { background: var(--unverified); }
+  .strip.idle span { opacity: .45; }
+  .caption { color: var(--muted); margin: 12px 0 0; min-height: 1.5em; }
+
+  .tally { display: flex; flex-wrap: wrap; gap: 8px 40px; margin: 32px 0 0; padding: 20px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
+  .tally div { display: flex; align-items: baseline; gap: 10px; }
+  .tally dt { order: 2; color: var(--muted); }
+  .tally dd { order: 1; margin: 0; font-size: 2rem; font-weight: 800; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+  .tally .swatch { width: 12px; height: 12px; align-self: center; order: 0; }
+
+  .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin: 24px 0 8px; flex-wrap: wrap; }
+  .toolbar label { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+  .toolbar a { color: var(--ink); font-weight: 600; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-weight: 600; color: var(--muted); padding: 8px 12px 8px 0; border-bottom: 1px solid var(--rule); }
+  td { padding: 12px 12px 12px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  td.result { white-space: nowrap; font-weight: 600; }
+  td.result::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 8px; background: var(--c, var(--pending)); }
+  td.link a { font: 400 .9rem var(--mono); color: var(--ink); overflow-wrap: anywhere; }
+  td.note { color: var(--muted); font-size: .95rem; }
+  td.note code { font: 400 .85rem var(--mono); overflow-wrap: anywhere; }
+  .empty { padding: 28px 0; color: var(--muted); }
+
+  @media (max-width: 640px) {
+    main { padding: 32px 16px 64px; }
+    .row { flex-direction: column; }
+    thead { display: none; }
+    tr { display: block; padding: 12px 0; border-bottom: 1px solid var(--rule); }
+    td { display: block; padding: 2px 0; border: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) { .strip span { transition: none; } }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <p class="wordmark"><i aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></i>LinkGuard</p>
+  <h1>Find the dead links in your docs</h1>
+  <p class="lede">Paste a docs page or a sitemap. LinkGuard checks every link and shows which are broken, which have moved, and which it couldn't verify.</p>
+
+  <form id="form" novalidate>
+    <label class="field" for="url">Docs page or sitemap address</label>
+    <div class="row">
+      <input id="url" type="url" inputmode="url" autocomplete="url" placeholder="https://docs.example.com/guide/" required>
+      <button id="go" type="submit">Check links</button>
+    </div>
+    <label class="check"><input id="watch" type="checkbox"> Re-check this site every Monday</label>
+    <p id="formError" class="error" role="alert"></p>
+  </form>
+
+  <section class="strip-wrap" aria-label="Results">
+    <div id="strip" class="strip idle" role="img" aria-label="Link results appear here"></div>
+    <p id="caption" class="caption" aria-live="polite">Every link becomes one bar. Green works, amber moved, red is broken, grey could not be verified.</p>
+
+    <div id="details" hidden>
+      <dl class="tally">
+        <div><span class="swatch" style="background:var(--broken)"></span><dd id="nBroken">0</dd><dt>Broken</dt></div>
+        <div><span class="swatch" style="background:var(--redirect)"></span><dd id="nRedirect">0</dd><dt>Moved</dt></div>
+        <div><span class="swatch" style="background:var(--unverified)"></span><dd id="nUnverified">0</dd><dt>Unverified</dt></div>
+        <div><span class="swatch" style="background:var(--ok)"></span><dd id="nOk">0</dd><dt>Working</dt></div>
+      </dl>
+      <div class="toolbar">
+        <label><input id="showOk" type="checkbox"> Show working links</label>
+        <a id="csv" href="#" hidden>Download problems as CSV</a>
+      </div>
+      <table>
+        <thead><tr><th>Result</th><th>Link</th><th>Details</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <p id="empty" class="empty" hidden>No problems found. Every link checked out.</p>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const LABEL = { broken: 'Broken', redirect: 'Moved', unverified: 'Unverified', ok: 'Working' };
+  const COLOR = { broken: 'var(--broken)', redirect: 'var(--redirect)', unverified: 'var(--unverified)', ok: 'var(--ok)' };
+  const ORDER = { broken: 0, redirect: 1, unverified: 2, ok: 3 };
+  let currentId = null;
+  let pollTimer = null;
+  let lastData = null;
+
+  async function api(path, options) {
+    const res = await fetch(path, options);
+    let body = {};
+    try { body = await res.json(); } catch (_) { /* not JSON */ }
+    if (!res.ok) throw new Error(body.error || 'Something went wrong (' + res.status + '). Try again.');
+    return body;
+  }
+
+  function setError(message) { $('formError').textContent = message || ''; }
+
+  function resetStrip(count, idle) {
+    const strip = $('strip');
+    strip.classList.toggle('idle', idle);
+    while (strip.children.length < count) strip.appendChild(document.createElement('span'));
+    while (strip.children.length > count) strip.lastChild.remove();
+    for (const tick of strip.children) tick.dataset.state = 'pending';
+  }
+
+  function openScan(id) {
+    currentId = id;
+    lastData = null;
+    history.replaceState(null, '', '#scan=' + id);
+    $('details').hidden = true;
+    $('csv').hidden = true;
+    resetStrip(60, false);
+    $('caption').textContent = 'Finding links…';
+    poll();
+  }
+
+  async function poll() {
+    clearTimeout(pollTimer);
+    const id = currentId;
+    try {
+      const data = await api('/scans/' + encodeURIComponent(id));
+      if (id !== currentId) return;
+      lastData = data;
+      render(data);
+      if (data.scan.status === 'RUNNING') pollTimer = setTimeout(poll, 1500);
+      else $('go').disabled = false;
+    } catch (err) {
+      if (id !== currentId) return;
+      setError(err.message);
+      $('go').disabled = false;
+    }
+  }
+
+  function render({ scan, links }) {
+    const strip = $('strip');
+    const known = scan.linkCount == null ? 60 : Math.max(scan.linkCount, links.length);
+    strip.classList.remove('idle');
+    while (strip.children.length < known) strip.appendChild(document.createElement('span'));
+    while (strip.children.length > known) strip.lastChild.remove();
+    const byArrival = links.slice().sort((a, b) => (a.checkedAt || '').localeCompare(b.checkedAt || ''));
+    for (let i = 0; i < strip.children.length; i++) {
+      strip.children[i].dataset.state = byArrival[i] ? byArrival[i].state : 'pending';
+    }
+
+    const counts = { broken: 0, redirect: 0, unverified: 0, ok: 0 };
+    for (const l of links) counts[l.state] = (counts[l.state] || 0) + 1;
+    $('nBroken').textContent = counts.broken;
+    $('nRedirect').textContent = counts.redirect;
+    $('nUnverified').textContent = counts.unverified;
+    $('nOk').textContent = counts.ok;
+    strip.setAttribute('aria-label', counts.broken + ' broken, ' + counts.redirect + ' moved, ' + counts.unverified + ' unverified, ' + counts.ok + ' working');
+
+    $('details').hidden = scan.linkCount == null && scan.status !== 'FAILED';
+    const sizeNote = scan.truncated ? ' (the first ' + scan.linkCount + ' were checked)' : '';
+    if (scan.status === 'FAILED') {
+      $('caption').textContent = 'The check failed. ' + (scan.error || 'Try again.');
+    } else if (scan.status === 'RUNNING') {
+      $('caption').textContent = scan.linkCount == null
+        ? 'Finding links…'
+        : 'Checked ' + links.length + ' of ' + scan.linkCount + ' links' + sizeNote;
+    } else {
+      const secs = scan.finishedAt ? Math.max(1, Math.round((Date.parse(scan.finishedAt) - Date.parse(scan.createdAt)) / 1000)) : null;
+      $('caption').textContent = 'Checked ' + links.length + ' links' + (secs ? ' in ' + secs + ' seconds' : '') + sizeNote + '.';
+    }
+
+    const csv = $('csv');
+    csv.hidden = scan.status !== 'COMPLETE';
+    csv.href = '/scans/' + encodeURIComponent(scan.scanId) + '/report.csv';
+    renderRows();
+  }
+
+  function safeHref(url) {
+    try { const u = new URL(url); return (u.protocol === 'http:' || u.protocol === 'https:') ? u.href : null; } catch (_) { return null; }
+  }
+
+  function renderRows() {
+    if (!lastData) return;
+    const showOk = $('showOk').checked;
+    const rows = lastData.links
+      .filter((l) => showOk || l.state !== 'ok')
+      .sort((a, b) => ORDER[a.state] - ORDER[b.state] || a.url.localeCompare(b.url))
+      .slice(0, 500);
+    const body = $('rows');
+    body.replaceChildren();
+    for (const l of rows) {
+      const tr = document.createElement('tr');
+
+      const result = document.createElement('td');
+      result.className = 'result';
+      result.style.setProperty('--c', COLOR[l.state] || 'var(--pending)');
+      result.textContent = LABEL[l.state] + (l.status ? ' ' + l.status : '');
+
+      const link = document.createElement('td');
+      link.className = 'link';
+      const href = safeHref(l.url);
+      if (href) {
+        const a = document.createElement('a');
+        a.href = href; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = l.url;
+        link.appendChild(a);
+      } else {
+        link.textContent = l.url;
+      }
+
+      const note = document.createElement('td');
+      note.className = 'note';
+      note.textContent = l.note || '';
+      if (l.state === 'redirect' && l.finalUrl) {
+        note.append(' Now at ');
+        const code = document.createElement('code');
+        code.textContent = l.finalUrl;
+        note.appendChild(code);
+      }
+
+      tr.append(result, link, note);
+      body.appendChild(tr);
+    }
+    const done = lastData.scan.status === 'COMPLETE';
+    $('empty').hidden = !(done && rows.length === 0);
+  }
+
+  $('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    setError('');
+    const url = $('url').value.trim();
+    if (!url) { setError('Enter the address of a docs page or sitemap.'); return; }
+    $('go').disabled = true;
+    try {
+      const { scanId } = await api('/scans', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ url, watch: $('watch').checked }),
+      });
+      openScan(scanId);
+    } catch (err) {
+      setError(err.message);
+      $('go').disabled = false;
+    }
+  });
+  $('showOk').addEventListener('change', renderRows);
+
+  resetStrip(60, true);
+  const m = /^#scan=([0-9a-f-]{36})$/.exec(location.hash);
+  if (m) { $('go').disabled = true; openScan(m[1]); }
+})();
+</script>
+</body>
+</html>

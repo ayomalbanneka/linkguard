@@ -1,0 +1,7 @@
+{
+  "name": "linkguard-functions",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lambda handlers for LinkGuard. No runtime dependencies: Node 22 and the AWS SDK v3 are provided by the Lambda runtime.",
+  "license": "MIT"
+}

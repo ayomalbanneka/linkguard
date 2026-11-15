@@ -1,0 +1,128 @@
+{
+  "Comment": "LinkGuard: find every link on a page or sitemap, check them in parallel, then summarise.",
+  "StartAt": "DiscoverLinks",
+  "States": {
+    "DiscoverLinks": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DiscoverLinksFunctionArn}",
+        "Payload.$": "$"
+      },
+      "ResultSelector": {
+        "scanId.$": "$.Payload.scanId",
+        "count.$": "$.Payload.count",
+        "links.$": "$.Payload.links"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }
+      ],
+      "Next": "AnyLinks"
+    },
+    "AnyLinks": {
+      "Type": "Choice",
+      "Choices": [
+        { "Variable": "$.count", "NumericGreaterThan": 0, "Next": "CheckAll" }
+      ],
+      "Default": "Finalize"
+    },
+    "CheckAll": {
+      "Type": "Map",
+      "ItemsPath": "$.links",
+      "MaxConcurrency": 20,
+      "ItemSelector": {
+        "scanId.$": "$.scanId",
+        "link.$": "$$.Map.Item.Value"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "CheckLink",
+        "States": {
+          "CheckLink": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${CheckLinkFunctionArn}",
+              "Payload.$": "$"
+            },
+            "ResultSelector": { "state.$": "$.Payload.state" },
+            "Retry": [
+              {
+                "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 4,
+                "BackoffRate": 2
+              }
+            ],
+            "Catch": [
+              { "ErrorEquals": ["States.ALL"], "Next": "CheckFailed" }
+            ],
+            "End": true
+          },
+          "CheckFailed": {
+            "Type": "Pass",
+            "Result": { "state": "unverified" },
+            "End": true
+          }
+        }
+      },
+      "ResultPath": null,
+      "Catch": [
+        { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }
+      ],
+      "Next": "Finalize"
+    },
+    "Finalize": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${FinalizeFunctionArn}",
+        "Payload": { "scanId.$": "$.scanId" }
+      },
+      "ResultSelector": { "summary.$": "$.Payload" },
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }
+      ],
+      "End": true
+    },
+    "MarkFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${TableName}",
+        "Key": {
+          "pk": { "S.$": "$.scanId" },
+          "sk": { "S": "META" }
+        },
+        "UpdateExpression": "SET #s = :failed, errorMessage = :err",
+        "ExpressionAttributeNames": { "#s": "status" },
+        "ExpressionAttributeValues": {
+          ":failed": { "S": "FAILED" },
+          ":err": { "S.$": "States.JsonToString($.error)" }
+        }
+      },
+      "Next": "ScanFailed"
+    },
+    "ScanFailed": {
+      "Type": "Fail",
+      "Error": "ScanFailed",
+      "Cause": "See errorMessage on the scan record."
+    }
+  }
+}
