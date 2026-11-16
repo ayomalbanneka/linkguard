@@ -6,10 +6,6 @@ Paste a docs page or a `sitemap.xml`. LinkGuard checks every link in parallel an
 
 Built for the AWS Builder Center Weekend Challenge: No Pipeline, No Problem. It is fully serverless: no servers, no containers, no CI/CD pipeline. One `sam build` and one `sam deploy` from your laptop.
 
-- Live app: [AppUrl from your deploy]
-- Demo video: [video URL]
-- Article: [Builder Center article URL]
-
 ## How it works
 
 ```mermaid
